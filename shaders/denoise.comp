@@ -1,0 +1,52 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2D historyImages[4];
+layout(set = 0, binding = 1, rgba16f) uniform image2D accumulationImage;
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D outputImage;
+
+layout(set = 0, binding = 3) uniform DenoiseUniforms {
+    uint frameIndex;
+    uint historyLength;
+    float frameBlendFactor;
+    float luminanceSigma;
+} ubo;
+
+const vec3 LUMA_WEIGHTS = vec3(0.2126, 0.7152, 0.0722);
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imageSizePx = imageSize(outputImage);
+
+    if (coord.x >= imageSizePx.x || coord.y >= imageSizePx.y) {
+        return;
+    }
+
+    const int availableHistory = int(min(ubo.historyLength, 4u));
+    vec4 currentSample = imageLoad(historyImages[0], coord);
+    vec3 accumulatedColor = currentSample.rgb;
+    float accumulatedWeight = 1.0;
+
+    float sigma = max(ubo.luminanceSigma, 1e-4);
+    float sigmaSq2 = 2.0 * sigma * sigma;
+
+    for (int i = 1; i < availableHistory; ++i) {
+        vec4 historySample = imageLoad(historyImages[i], coord);
+        float lumaDiff = abs(dot(historySample.rgb - currentSample.rgb, LUMA_WEIGHTS));
+        float weight = exp(-(lumaDiff * lumaDiff) / sigmaSq2);
+        accumulatedColor += historySample.rgb * weight;
+        accumulatedWeight += weight;
+    }
+
+    vec3 temporalAverage = accumulatedColor / max(accumulatedWeight, 1e-4);
+    vec3 previousAccum = imageLoad(accumulationImage, coord).rgb;
+    float blend = clamp(ubo.frameBlendFactor, 0.0, 1.0);
+
+    vec3 denoised = (ubo.frameIndex == 0u)
+        ? temporalAverage
+        : mix(temporalAverage, previousAccum, blend);
+
+    imageStore(outputImage, coord, vec4(denoised, currentSample.a));
+    imageStore(accumulationImage, coord, vec4(denoised, currentSample.a));
+}
