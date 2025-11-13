@@ -1,0 +1,91 @@
+#version 450
+
+// Multi-frame temporal denoising compute shader
+// Uses exponential moving average with adaptive filtering
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0, rgba8) uniform readonly image2D currentFrame;
+layout(binding = 1, rgba8) uniform readonly image2D previousDenoisedFrame;
+layout(binding = 2, rgba8) uniform writeonly image2D outputFrame;
+
+layout(push_constant) uniform DenoiseParams {
+    float alpha;           // Temporal blending factor (0-1)
+    float noiseThreshold;  // Noise threshold for adaptive filtering
+    ivec2 imageSize;       // Image dimensions
+} params;
+
+vec4 bilateralFilter(vec2 uv, vec4 centerPixel) {
+    // Simple bilateral filter for spatial denoising
+    vec4 result = vec4(0.0);
+    float weightSum = 0.0;
+    
+    const int radius = 2;
+    const float spatialSigma = 2.0;
+    const float colorSigma = 0.1;
+    
+    for (int y = -radius; y <= radius; y++) {
+        for (int x = -radius; x <= radius; x++) {
+            ivec2 offset = ivec2(x, y);
+            ivec2 coord = ivec2(uv) + offset;
+            
+            // Clamp coordinates
+            coord = clamp(coord, ivec2(0), params.imageSize - ivec2(1));
+            
+            vec4 neighbor = imageLoad(currentFrame, coord);
+            
+            // Spatial weight (Gaussian)
+            float spatialDist = length(vec2(x, y));
+            float spatialWeight = exp(-(spatialDist * spatialDist) / (2.0 * spatialSigma * spatialSigma));
+            
+            // Color weight (Gaussian)
+            vec4 colorDiff = neighbor - centerPixel;
+            float colorDist = length(colorDiff.rgb);
+            float colorWeight = exp(-(colorDist * colorDist) / (2.0 * colorSigma * colorSigma));
+            
+            float weight = spatialWeight * colorWeight;
+            result += neighbor * weight;
+            weightSum += weight;
+        }
+    }
+    
+    return result / max(weightSum, 0.001);
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (coord.x >= params.imageSize.x || coord.y >= params.imageSize.y) {
+        return;
+    }
+    
+    vec2 uv = vec2(coord);
+    
+    // Load current frame pixel
+    vec4 current = imageLoad(currentFrame, coord);
+    
+    // Load previous denoised frame pixel
+    vec4 previous = imageLoad(previousDenoisedFrame, coord);
+    
+    // Apply spatial bilateral filter to current frame
+    vec4 spatiallyFiltered = bilateralFilter(uv, current);
+    
+    // Temporal blending: exponential moving average
+    // Higher alpha = more weight to current frame (less temporal smoothing)
+    // Lower alpha = more weight to previous frame (more temporal smoothing)
+    vec4 temporallyBlended = mix(previous, spatiallyFiltered, params.alpha);
+    
+    // Adaptive filtering: reduce blending in high-variance regions
+    vec4 colorDiff = abs(spatiallyFiltered - previous);
+    float variance = length(colorDiff.rgb);
+    
+    if (variance > params.noiseThreshold) {
+        // High variance region - likely motion or detail
+        // Use more of the current frame to preserve detail
+        float adaptiveAlpha = min(params.alpha * 2.0, 1.0);
+        temporallyBlended = mix(previous, spatiallyFiltered, adaptiveAlpha);
+    }
+    
+    // Write output
+    imageStore(outputFrame, coord, temporallyBlended);
+}
