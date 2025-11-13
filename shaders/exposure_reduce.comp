@@ -1,0 +1,44 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, rgba8) uniform readonly image2D srcImg;
+
+layout(binding = 1) buffer ExposureHistogram {
+    uint bins[];
+} exposure;
+
+layout(std140, binding = 2) uniform Params {
+    vec4 rotationMatrix;
+    vec4 rotationCenter;
+    vec4 sharpenParams;
+    vec4 exposureParams;
+    vec4 denoiseParams;
+    vec4 srParams;
+} params;
+
+const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(srcImg);
+    if (gid.x >= size.x || gid.y >= size.y) {
+        return;
+    }
+
+    vec4 color = imageLoad(srcImg, gid);
+    float luma = dot(color.rgb, LUMA);
+
+    if (luma < params.exposureParams.x) {
+        return;
+    }
+
+    int grid = max(1, int(params.exposureParams.z + 0.5));
+    ivec2 tileSize = ivec2(max(1, (size.x + grid - 1) / grid),
+                           max(1, (size.y + grid - 1) / grid));
+    ivec2 tileCoord = ivec2(gid.x / tileSize.x, gid.y / tileSize.y);
+    tileCoord = clamp(tileCoord, ivec2(0), ivec2(grid - 1));
+
+    int tileIndex = tileCoord.y * grid + tileCoord.x;
+    atomicAdd(exposure.bins[tileIndex], 1u);
+}
