@@ -1,0 +1,194 @@
+#version 450
+
+// Temporal multi-frame denoising compute shader
+// Implements a sophisticated temporal filter with motion compensation
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Input images
+layout(binding = 0, rgba8) uniform readonly image2D currentFrame;
+layout(binding = 1, rgba8) uniform readonly image2D previousFrame1;
+layout(binding = 2, rgba8) uniform readonly image2D previousFrame2;
+layout(binding = 3, rgba8) uniform readonly image2D previousFrame3;
+
+// Output image
+layout(binding = 4, rgba8) uniform writeonly image2D outputFrame;
+
+// Motion vectors (optional, for motion-compensated denoising)
+layout(binding = 5, rg16f) uniform readonly image2D motionVectors;
+
+// Push constants for parameters
+layout(push_constant) uniform PushConstants {
+    float temporalWeight;     // Weight for temporal filtering (0.0 - 1.0)
+    float spatialSigma;        // Spatial kernel sigma
+    float colorSigma;          // Color difference sigma
+    int useMotionCompensation; // Enable motion compensation
+    float noiseThreshold;      // Threshold for noise detection
+    int frameCount;            // Number of frames to use (1-4)
+    float adaptiveStrength;    // Adaptive filtering strength
+    int kernelSize;            // Spatial kernel size (e.g., 3, 5, 7)
+} params;
+
+// Constants
+const float PI = 3.14159265359;
+const float EPSILON = 0.0001;
+
+// Calculate Gaussian weight
+float gaussian(float x, float sigma) {
+    return exp(-(x * x) / (2.0 * sigma * sigma));
+}
+
+// Calculate color distance
+float colorDistance(vec3 c1, vec3 c2) {
+    vec3 diff = c1 - c2;
+    return sqrt(dot(diff, diff));
+}
+
+// Bilateral filter weight calculation
+float bilateralWeight(vec3 centerColor, vec3 sampleColor, float spatialDist) {
+    float colorDist = colorDistance(centerColor, sampleColor);
+    float spatialWeight = gaussian(spatialDist, params.spatialSigma);
+    float colorWeight = gaussian(colorDist, params.colorSigma);
+    return spatialWeight * colorWeight;
+}
+
+// Estimate local variance for adaptive filtering
+float estimateLocalVariance(ivec2 center, image2D img) {
+    float mean = 0.0;
+    float variance = 0.0;
+    int count = 0;
+    
+    const int radius = 2;
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            ivec2 pos = center + ivec2(dx, dy);
+            vec4 sample = imageLoad(img, pos);
+            float luminance = dot(sample.rgb, vec3(0.299, 0.587, 0.114));
+            mean += luminance;
+            count++;
+        }
+    }
+    
+    mean /= float(count);
+    
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            ivec2 pos = center + ivec2(dx, dy);
+            vec4 sample = imageLoad(img, pos);
+            float luminance = dot(sample.rgb, vec3(0.299, 0.587, 0.114));
+            float diff = luminance - mean;
+            variance += diff * diff;
+        }
+    }
+    
+    return variance / float(count);
+}
+
+// Motion-compensated pixel fetch
+vec4 fetchMotionCompensated(image2D img, ivec2 pos, vec2 motionVector) {
+    if (params.useMotionCompensation != 0) {
+        ivec2 compensatedPos = pos - ivec2(motionVector);
+        ivec2 imgSize = imageSize(currentFrame);
+        
+        // Clamp to valid range
+        compensatedPos = clamp(compensatedPos, ivec2(0), imgSize - ivec2(1));
+        return imageLoad(img, compensatedPos);
+    } else {
+        return imageLoad(img, pos);
+    }
+}
+
+// Temporal filtering across multiple frames
+vec4 temporalFilter(ivec2 pos) {
+    vec4 currentColor = imageLoad(currentFrame, pos);
+    vec2 motion = vec2(0.0);
+    
+    if (params.useMotionCompensation != 0) {
+        motion = imageLoad(motionVectors, pos).rg;
+    }
+    
+    // Estimate local variance for adaptive filtering
+    float variance = estimateLocalVariance(pos, currentFrame);
+    float adaptiveFactor = clamp(variance / (params.noiseThreshold * params.noiseThreshold), 0.0, 1.0);
+    float effectiveTemporalWeight = params.temporalWeight * (1.0 - adaptiveFactor * params.adaptiveStrength);
+    
+    // Initialize accumulator with current frame
+    vec4 accumulated = currentColor;
+    float totalWeight = 1.0;
+    
+    // Accumulate previous frames
+    vec4 prevColors[3];
+    prevColors[0] = fetchMotionCompensated(previousFrame1, pos, motion);
+    prevColors[1] = fetchMotionCompensated(previousFrame2, pos, motion * 2.0);
+    prevColors[2] = fetchMotionCompensated(previousFrame3, pos, motion * 3.0);
+    
+    // Temporal weights decay with frame distance
+    float temporalWeights[3];
+    temporalWeights[0] = effectiveTemporalWeight;
+    temporalWeights[1] = effectiveTemporalWeight * 0.7;
+    temporalWeights[2] = effectiveTemporalWeight * 0.4;
+    
+    for (int i = 0; i < min(params.frameCount - 1, 3); i++) {
+        vec4 prevColor = prevColors[i];
+        
+        // Calculate temporal difference
+        float colorDiff = colorDistance(currentColor.rgb, prevColor.rgb);
+        
+        // Reject outliers (likely motion or scene changes)
+        if (colorDiff < params.noiseThreshold * 2.0) {
+            float weight = temporalWeights[i] * gaussian(colorDiff, params.colorSigma);
+            accumulated += prevColor * weight;
+            totalWeight += weight;
+        }
+    }
+    
+    return accumulated / totalWeight;
+}
+
+// Spatial bilateral filter
+vec4 spatialFilter(ivec2 pos, vec4 temporalResult) {
+    vec3 centerColor = temporalResult.rgb;
+    vec4 accumulated = temporalResult;
+    float totalWeight = 1.0;
+    
+    int halfKernel = params.kernelSize / 2;
+    
+    for (int dy = -halfKernel; dy <= halfKernel; dy++) {
+        for (int dx = -halfKernel; dx <= halfKernel; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            
+            ivec2 samplePos = pos + ivec2(dx, dy);
+            vec4 sampleColor = imageLoad(currentFrame, samplePos);
+            
+            float spatialDist = length(vec2(dx, dy));
+            float weight = bilateralWeight(centerColor, sampleColor.rgb, spatialDist);
+            
+            accumulated += sampleColor * weight;
+            totalWeight += weight;
+        }
+    }
+    
+    return accumulated / totalWeight;
+}
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imgSize = imageSize(currentFrame);
+    
+    // Boundary check
+    if (pos.x >= imgSize.x || pos.y >= imgSize.y) {
+        return;
+    }
+    
+    // Apply temporal filtering first
+    vec4 temporalResult = temporalFilter(pos);
+    
+    // Apply spatial filtering on top of temporal result
+    vec4 finalColor = spatialFilter(pos, temporalResult);
+    
+    // Preserve alpha channel
+    finalColor.a = imageLoad(currentFrame, pos).a;
+    
+    // Write result
+    imageStore(outputFrame, pos, finalColor);
+}
