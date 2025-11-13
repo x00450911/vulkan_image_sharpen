@@ -1,0 +1,49 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D srcImg;
+layout(binding = 1, rgba8) uniform writeonly image2D dstImg;
+
+layout(std140, binding = 2) uniform Params {
+    vec4 rotationMatrix;
+    vec4 rotationCenter;
+    vec4 sharpenParams;
+    vec4 exposureParams;
+    vec4 denoiseParams;
+    vec4 srParams;
+} params;
+
+vec3 sampleRgb(vec2 uv) {
+    return texture(srcImg, uv).rgb;
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dstImg);
+    if (gid.x >= size.x || gid.y >= size.y) {
+        return;
+    }
+
+    vec2 coord = (vec2(gid) + 0.5) / vec2(size);
+    mat2 rot = mat2(params.rotationMatrix.x, params.rotationMatrix.z,
+                    params.rotationMatrix.y, params.rotationMatrix.w);
+    vec2 rotated = rot * (coord - params.rotationCenter.xy) + params.rotationCenter.xy;
+
+    vec3 center = sampleRgb(rotated);
+    vec2 texel = 1.0 / vec2(size);
+
+    vec3 blur = sampleRgb(rotated + vec2(texel.x, 0.0));
+    blur += sampleRgb(rotated - vec2(texel.x, 0.0));
+    blur += sampleRgb(rotated + vec2(0.0, texel.y));
+    blur += sampleRgb(rotated - vec2(0.0, texel.y));
+    blur *= 0.25;
+
+    float amount = params.sharpenParams.x;
+    vec3 sharpened = center + amount * (center - blur);
+    vec3 clamped = clamp(sharpened,
+                         vec3(params.sharpenParams.y),
+                         vec3(params.sharpenParams.z));
+
+    imageStore(dstImg, gid, vec4(clamped, 1.0));
+}

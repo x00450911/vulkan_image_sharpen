@@ -1,0 +1,47 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, rgba8) uniform readonly image2D currentImg;
+layout(binding = 1, rgba8) uniform readonly image2D historyImg[4];
+layout(binding = 2, rgba8) uniform writeonly image2D dstImg;
+
+layout(std140, binding = 3) uniform Params {
+    vec4 rotationMatrix;
+    vec4 rotationCenter;
+    vec4 sharpenParams;
+    vec4 exposureParams;
+    vec4 denoiseParams;
+    vec4 srParams;
+} params;
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(dstImg);
+    if (gid.x >= size.x || gid.y >= size.y) {
+        return;
+    }
+
+    vec4 current = imageLoad(currentImg, gid);
+
+    int historyCount = clamp(int(params.denoiseParams.z + 0.5), 0, 4);
+    float blend = clamp(params.denoiseParams.x, 0.0, 1.0);
+    float motionThreshold = max(1e-4, params.denoiseParams.y);
+
+    vec3 accum = current.rgb * (1.0 - blend);
+    float totalWeight = 1.0 - blend;
+
+    for (int i = 0; i < historyCount; ++i) {
+        vec4 historySample = imageLoad(historyImg[i], gid);
+        float diff = length(historySample.rgb - current.rgb);
+        float weight = blend / max(1.0, float(historyCount));
+        if (diff > motionThreshold) {
+            weight *= 0.1;
+        }
+        accum += historySample.rgb * weight;
+        totalWeight += weight;
+    }
+
+    vec3 result = accum / max(totalWeight, 1e-5);
+    imageStore(dstImg, gid, vec4(result, current.a));
+}
