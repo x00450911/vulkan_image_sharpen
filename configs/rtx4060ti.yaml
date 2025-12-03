@@ -1,0 +1,22 @@
+model:
+  architecture: videosrnet
+  upscale_factor: 4
+  in_channels: 3
+  hidden_channels: 96
+  num_residual_blocks: 16
+  temporal_radius: 1
+  weights_path: checkpoints/videosrnet_x4.pth
+  precision: fp16
+
+video:
+  input_path: data/input.mp4
+  output_path: outputs/input_x4.mp4
+  fps: null
+  codec: mp4v
+  chunk_size: 16
+  max_frames: null
+
+pipeline:
+  device: cuda
+  warmup_steps: 2
+  benchmark_cuda: true
