@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "accelerator/accelerator.h"
+#include "display_enhancer.h"
 #include "image.h"
 #include "mctf_denoiser.h"
 #include "super_resolution.h"
@@ -29,6 +30,7 @@ int main() {
 
     SuperResolution sr({2, 1.25f, 0.65f});
     MCTFDenoiser denoiser({2, 2, 0.9f});
+    DisplayEnhancer enhancer({350.f, 0.42f, 1.4f, 0.9f, 3, 0.15f, 1.08f}, {64, 32, true, true});
 
     std::vector<Image> frames;
     const int frameCount = 5;
@@ -39,10 +41,11 @@ int main() {
 
     auto denoised = denoiser.denoise(frames, runtime);
     auto enhanced = sr.upscale(denoised, runtime);
+    auto displayReady = enhancer.enhance(enhanced, runtime);
 
-    SaveAsPGM(enhanced, "sr_output.pgm");
+    SaveAsPGM(displayReady, "display_enhanced.pgm");
 
-    std::cout << "Pipeline complete. Output written to sr_output.pgm\n";
+    std::cout << "Pipeline complete. Output written to display_enhanced.pgm\n";
 
     for (auto kind : {AcceleratorKind::CPU, AcceleratorKind::DSP, AcceleratorKind::GPU, AcceleratorKind::NPU}) {
         const auto metrics = runtime.latestMetrics(kind);

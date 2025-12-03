@@ -11,6 +11,7 @@ add_library(gen2_pipeline
     src/image.cpp
     src/super_resolution.cpp
     src/mctf_denoiser.cpp
+    src/display_enhancer.cpp
     src/accelerator/accelerator.cpp)
 
 target_include_directories(gen2_pipeline

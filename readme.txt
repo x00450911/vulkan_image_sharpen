@@ -13,7 +13,8 @@ on Qualcomm Snapdragon Gen2 platforms.
 - Qualcomm Gen2 runtime shim that models power/topology management and exposes a
   single dispatch interface for workloads destined to CPU/DSP/GPU/NPU.
 - Demo driver that synthesizes low-res noisy frames, denoises them, runs super
-  resolution, and emits a `sr_output.pgm` artifact.
+  resolution, applies display enhancement, and emits `display_enhanced.pgm`.
+- Display enhancer tuned for Adreno 735 (tone mapping, local contrast, saturation).
 
 ## Building (host simulation)
 ```bash
@@ -21,8 +22,9 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/gen2_demo
 ```
-The executable prints per-accelerator latency/utilization estimates and writes a
-PGM image you can inspect with tools such as `display` or `ffplay`.
+The executable prints per-accelerator latency/utilization estimates and writes
+`display_enhanced.pgm`, which you can inspect with tools such as `display` or
+`ffplay`.
 
 ## Deploying on Snapdragon Gen2
 1. **Toolchain setup**: Install the Qualcomm AI Stack (QNN/SNPE), Hexagon SDK,
@@ -54,11 +56,21 @@ PGM image you can inspect with tools such as `display` or `ffplay`.
 - Add a quality assurance harness that compares PSNR/SSIM before/after MCTF + SR
   and records power/perf deltas across the four accelerators.
 
+## Adreno 735 Performance Notes
+- Enable Vulkan 1.3 with `VK_EXT_subgroup_size_control` so compute shaders lock
+  to a 64-lane wave (mirrors `Adreno735PerfHints::waveSize`).
+- Record tone-map + local-contrast passes in an async compute queue to overlap
+  with CPU-based MCTF fusion; the example toggles this via `enableAsyncCompute`.
+- Tile workloads to 32×32 pixels to maximize LDS reuse on the A7xx texture cache.
+- Prefer cooperative matrix paths (`enableCooperativeMatrix`) when mapping CNN
+  refiners to the NPU; fall back to scalar math if the extension is absent.
+
 ## Repository layout
 ```
 include/
   image.h                # Minimal tensor-like container
   accelerator/           # Qualcomm runtime shim
+  display_enhancer.h     # Tone/contrast enhancer tuned for Adreno
   super_resolution.h     # SR orchestrator
   mctf_denoiser.h        # Motion-compensated temporal filter
 src/
